@@ -19,19 +19,20 @@ contract VaultManagerV2 is IVaultManager, Initializable {
   using FixedPointMathLib for uint;
   using SafeTransferLib   for ERC20;
 
-  uint public constant MAX_VAULTS          = 5;
+  uint public constant MAX_VAULTS  = 5;
   uint public constant MAX_VAULTS_KEROSENE = 5;
 
   uint public constant MIN_COLLATERIZATION_RATIO = 1.5e18; // 150%
   uint public constant LIQUIDATION_REWARD        = 0.2e18; //  20%
 
-  DNft     public immutable dNft;
-  Dyad     public immutable dyad;
+  DNft     public immutable dNft; // NFT
+  Dyad     public immutable dyad; // Stable coin
   Licenser public immutable vaultLicenser;
 
   KerosineManager public keroseneManager;
 
   mapping (uint => EnumerableSet.AddressSet) internal vaults; 
+
   mapping (uint => EnumerableSet.AddressSet) internal vaultsKerosene; 
 
   mapping (uint => uint) public idToBlockOfLastDeposit;
@@ -80,13 +81,13 @@ contract VaultManagerV2 is IVaultManager, Initializable {
   function addKerosene(
       uint    id,
       address vault
-  ) 
+  )
     external
       isDNftOwner(id)
   {
     if (vaultsKerosene[id].length() >= MAX_VAULTS_KEROSENE) revert TooManyVaults();
-    if (!keroseneManager.isLicensed(vault))                 revert VaultNotLicensed();
-    if (!vaultsKerosene[id].add(vault))                     revert VaultAlreadyAdded();
+    if (!keroseneManager.isLicensed(vault)) revert VaultNotLicensed();
+    if (!vaultsKerosene[id].add(vault)) revert VaultAlreadyAdded();
     emit Added(id, vault);
   }
 
@@ -120,7 +121,7 @@ contract VaultManagerV2 is IVaultManager, Initializable {
     uint    id,
     address vault,
     uint    amount
-  ) 
+  )
     external 
       isValidDNft(id)
   {
@@ -141,14 +142,18 @@ contract VaultManagerV2 is IVaultManager, Initializable {
       isDNftOwner(id)
   {
     if (idToBlockOfLastDeposit[id] == block.number) revert DepositedInSameBlock();
+
+    // Debt which is minted 
     uint dyadMinted = dyad.mintedDyad(address(this), id);
+
     Vault _vault = Vault(vault);
-    uint value = amount * _vault.assetPrice() 
-                  * 1e18 
-                  / 10**_vault.oracle().decimals() 
-                  / 10**_vault.asset().decimals();
+
+    uint value = amount * _vault.assetPrice() * 1e18 / 10**_vault.oracle().decimals()/ 10**_vault.asset().decimals();
+
     if (getNonKeroseneValue(id) - value < dyadMinted) revert NotEnoughExoCollat();
+
     _vault.withdraw(id, to, amount);
+
     if (collatRatio(id) < MIN_COLLATERIZATION_RATIO)  revert CrTooLow(); 
   }
 
@@ -162,9 +167,13 @@ contract VaultManagerV2 is IVaultManager, Initializable {
       isDNftOwner(id)
   {
     uint newDyadMinted = dyad.mintedDyad(address(this), id) + amount;
+
     if (getNonKeroseneValue(id) < newDyadMinted)     revert NotEnoughExoCollat();
+
     dyad.mint(id, to, amount);
+
     if (collatRatio(id) < MIN_COLLATERIZATION_RATIO) revert CrTooLow(); 
+
     emit MintDyad(id, amount, to);
   }
 
@@ -190,14 +199,17 @@ contract VaultManagerV2 is IVaultManager, Initializable {
     external 
       isDNftOwner(id)
     returns (uint) { 
+
       dyad.burn(id, msg.sender, amount);
+
       Vault _vault = Vault(vault);
-      uint asset = amount 
-                    * (10**(_vault.oracle().decimals() + _vault.asset().decimals())) 
-                    / _vault.assetPrice() 
-                    / 1e18;
+
+      uint asset = amount * (10**(_vault.oracle().decimals() + _vault.asset().decimals())) / _vault.assetPrice() / 1e18;
+
       withdraw(id, vault, asset, to);
+
       emit RedeemDyad(id, vault, amount, to);
+
       return asset;
   }
 
@@ -205,23 +217,31 @@ contract VaultManagerV2 is IVaultManager, Initializable {
   function liquidate(
     uint id,
     uint to
-  ) 
-    external 
+  )
+    external
       isValidDNft(id)
       isValidDNft(to)
     {
       uint cr = collatRatio(id);
+
       if (cr >= MIN_COLLATERIZATION_RATIO) revert CrTooHigh();
+
       dyad.burn(id, msg.sender, dyad.mintedDyad(address(this), id));
 
-      uint cappedCr               = cr < 1e18 ? 1e18 : cr;
+      uint cappedCr = cr < 1e18 ? 1e18 : cr;
+
       uint liquidationEquityShare = (cappedCr - 1e18).mulWadDown(LIQUIDATION_REWARD);
+
       uint liquidationAssetShare  = (liquidationEquityShare + 1e18).divWadDown(cappedCr);
 
       uint numberOfVaults = vaults[id].length();
+
       for (uint i = 0; i < numberOfVaults; i++) {
+
           Vault vault      = Vault(vaults[id].at(i));
+
           uint  collateral = vault.id2asset(id).mulWadUp(liquidationAssetShare);
+
           vault.move(id, to, collateral);
       }
       emit Liquidate(id, msg.sender, to);
@@ -255,10 +275,15 @@ contract VaultManagerV2 is IVaultManager, Initializable {
     returns (uint) {
       uint totalUsdValue;
       uint numberOfVaults = vaults[id].length(); 
+
       for (uint i = 0; i < numberOfVaults; i++) {
+
         Vault vault = Vault(vaults[id].at(i));
+
         uint usdValue;
+
         if (vaultLicenser.isLicensed(address(vault))) {
+
           usdValue = vault.getUsdValue(id);        
         }
         totalUsdValue += usdValue;
@@ -272,13 +297,20 @@ contract VaultManagerV2 is IVaultManager, Initializable {
     public 
     view
     returns (uint) {
+
       uint totalUsdValue;
-      uint numberOfVaults = vaultsKerosene[id].length(); 
+
+      uint numberOfVaults = vaultsKerosene[id].length();
+
       for (uint i = 0; i < numberOfVaults; i++) {
+
         Vault vault = Vault(vaultsKerosene[id].at(i));
+
         uint usdValue;
+
         if (keroseneManager.isLicensed(address(vault))) {
-          usdValue = vault.getUsdValue(id);        
+
+          usdValue = vault.getUsdValue(id);
         }
         totalUsdValue += usdValue;
       }
